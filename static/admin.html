@@ -270,6 +270,24 @@
             line-height: 1.2;
         }
 
+        .sync-filter-btn {
+            cursor: pointer;
+            text-align: left;
+            transition: all 0.2s ease;
+        }
+
+        .sync-filter-btn:hover {
+            border-color: var(--accent-color);
+            color: var(--accent-color);
+        }
+
+        .sync-filter-btn.active {
+            border-color: var(--accent-color);
+            background: var(--glass-bg);
+            color: var(--accent-color);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+        }
+
         .action-muted {
             color: var(--text-secondary);
             font-size: 0.9rem;
@@ -1072,10 +1090,10 @@
                 </div>
                 <div class="section-body">
                     <div class="sync-summary" id="cpaSyncSummary">
-                        <div class="sync-chip"><strong>-</strong>全部</div>
-                        <div class="sync-chip"><strong>-</strong>已同步</div>
-                        <div class="sync-chip"><strong>-</strong>仅CPA</div>
-                        <div class="sync-chip"><strong>-</strong>仅本地</div>
+                        <button class="sync-chip sync-filter-btn active" data-filter="all" onclick="setCpaSyncFilter('all')"><strong>-</strong>全部</button>
+                        <button class="sync-chip sync-filter-btn" data-filter="synced" onclick="setCpaSyncFilter('synced')"><strong>-</strong>已同步</button>
+                        <button class="sync-chip sync-filter-btn" data-filter="cpa_only" onclick="setCpaSyncFilter('cpa_only')"><strong>-</strong>仅CPA</button>
+                        <button class="sync-chip sync-filter-btn" data-filter="local_only" onclick="setCpaSyncFilter('local_only')"><strong>-</strong>仅本地</button>
                     </div>
                     <table>
                         <thead>
@@ -1323,6 +1341,9 @@
         let credentialsPage = 0;
         let cdksPage = 0;
         let cpaCredentialsLoaded = false;
+        let cpaCredentialData = [];
+        let cpaCredentialStats = {};
+        let cpaSyncFilter = 'all';
         const pageSize = 20;
 
         const htmlEscapeMap = {
@@ -1482,11 +1503,18 @@
 
         function renderCpaSyncSummary(stats = {}) {
             document.getElementById('cpaSyncSummary').innerHTML = `
-                <div class="sync-chip"><strong>${safeNumber(stats.total)}</strong>全部</div>
-                <div class="sync-chip"><strong>${safeNumber(stats.synced)}</strong>已同步</div>
-                <div class="sync-chip"><strong>${safeNumber(stats.cpa_only)}</strong>仅CPA</div>
-                <div class="sync-chip"><strong>${safeNumber(stats.local_only)}</strong>仅本地</div>
+                <button class="sync-chip sync-filter-btn ${cpaSyncFilter === 'all' ? 'active' : ''}" data-filter="all" onclick="setCpaSyncFilter('all')"><strong>${safeNumber(stats.total)}</strong>全部</button>
+                <button class="sync-chip sync-filter-btn ${cpaSyncFilter === 'synced' ? 'active' : ''}" data-filter="synced" onclick="setCpaSyncFilter('synced')"><strong>${safeNumber(stats.synced)}</strong>已同步</button>
+                <button class="sync-chip sync-filter-btn ${cpaSyncFilter === 'cpa_only' ? 'active' : ''}" data-filter="cpa_only" onclick="setCpaSyncFilter('cpa_only')"><strong>${safeNumber(stats.cpa_only)}</strong>仅CPA</button>
+                <button class="sync-chip sync-filter-btn ${cpaSyncFilter === 'local_only' ? 'active' : ''}" data-filter="local_only" onclick="setCpaSyncFilter('local_only')"><strong>${safeNumber(stats.local_only)}</strong>仅本地</button>
             `;
+        }
+
+        function setCpaSyncFilter(filter) {
+            const allowedFilters = new Set(['all', 'synced', 'cpa_only', 'local_only']);
+            cpaSyncFilter = allowedFilters.has(filter) ? filter : 'all';
+            renderCpaSyncSummary(cpaCredentialStats);
+            renderCpaCredentialsTable(cpaCredentialData);
         }
 
         function getCpaFlags(cpa) {
@@ -1517,6 +1545,57 @@
             return cpaTime || localTime || '';
         }
 
+        function getCpaFilterLabel(filter) {
+            switch (filter) {
+                case 'synced': return '已同步';
+                case 'cpa_only': return '仅CPA';
+                case 'local_only': return '仅本地';
+                default: return '全部';
+            }
+        }
+
+        function renderCpaCredentialsTable(items = []) {
+            const tbody = document.getElementById('cpaCredentialsTable');
+            const filteredItems = cpaSyncFilter === 'all'
+                ? items
+                : items.filter(item => item.match_status === cpaSyncFilter);
+
+            if (!filteredItems.length) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="8">
+                            <div class="empty-state">
+                                <div class="icon">📭</div>
+                                <p>暂无${escapeHtml(getCpaFilterLabel(cpaSyncFilter))}凭证</p>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = filteredItems.map(item => {
+                const meta = getSyncStatusMeta(item.match_status);
+                const localId = item.local?.id ? safeNumber(item.local.id) : 0;
+                const action = item.match_status === 'local_only' && localId > 0
+                    ? `<button class="refresh-btn" style="color: var(--error-text);" onclick="cleanupLocalCredential(${localId})">清理本地</button>`
+                    : '<span class="action-muted">无需操作</span>';
+
+                return `
+                    <tr>
+                        <td><span class="badge badge-${meta.className}">${escapeHtml(meta.label)}</span></td>
+                        <td>${escapeHtml(item.provider || '-')}</td>
+                        <td>${escapeHtml(item.email || item.local?.email || item.cpa?.email || '-')}</td>
+                        <td>${getCpaStatusText(item.cpa)}</td>
+                        <td>${getCpaFlags(item.cpa)}</td>
+                        <td>${getLocalText(item.local)}</td>
+                        <td>${escapeHtml(formatDate(getSyncTime(item)))}</td>
+                        <td>${action}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
         // 加载CPA凭证对比
         async function loadCpaCredentials() {
             const tbody = document.getElementById('cpaCredentialsTable');
@@ -1540,43 +1619,13 @@
                     throw new Error(result.error || '加载失败');
                 }
 
-                renderCpaSyncSummary(result.stats);
-
-                if (!result.data || result.data.length === 0) {
-                    tbody.innerHTML = `
-                        <tr>
-                            <td colspan="8">
-                                <div class="empty-state">
-                                    <div class="icon">📭</div>
-                                    <p>暂无CPA或本地凭证数据</p>
-                                </div>
-                            </td>
-                        </tr>
-                    `;
-                    return;
-                }
-
-                tbody.innerHTML = result.data.map(item => {
-                    const meta = getSyncStatusMeta(item.match_status);
-                    const localId = item.local?.id ? safeNumber(item.local.id) : 0;
-                    const action = item.match_status === 'local_only' && localId > 0
-                        ? `<button class="refresh-btn" style="color: var(--error-text);" onclick="cleanupLocalCredential(${localId})">清理本地</button>`
-                        : '<span class="action-muted">无需操作</span>';
-
-                    return `
-                        <tr>
-                            <td><span class="badge badge-${meta.className}">${escapeHtml(meta.label)}</span></td>
-                            <td>${escapeHtml(item.provider || '-')}</td>
-                            <td>${escapeHtml(item.email || item.local?.email || item.cpa?.email || '-')}</td>
-                            <td>${getCpaStatusText(item.cpa)}</td>
-                            <td>${getCpaFlags(item.cpa)}</td>
-                            <td>${getLocalText(item.local)}</td>
-                            <td>${escapeHtml(formatDate(getSyncTime(item)))}</td>
-                            <td>${action}</td>
-                        </tr>
-                    `;
-                }).join('');
+                cpaCredentialData = Array.isArray(result.data) ? result.data : [];
+                cpaCredentialStats = result.stats || {};
+                renderCpaSyncSummary(cpaCredentialStats);
+                renderCpaCredentialsTable(cpaCredentialData);
             } catch (error) {
+                cpaCredentialData = [];
+                cpaCredentialStats = {};
                 renderCpaSyncSummary();
                 tbody.innerHTML = `
                     <tr>
