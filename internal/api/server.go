@@ -565,6 +565,61 @@ func (s *Server) deletePendingAuth(state string) {
 	s.pendingMu.Unlock()
 }
 
+func authFileUnavailableMessage(file cpa.AuthFile) string {
+	if file.Disabled {
+		return "账号不可用：CPA标记该凭证已停用"
+	}
+	if file.Unavailable {
+		if strings.TrimSpace(file.StatusMessage) != "" {
+			return "账号不可用：" + file.StatusMessage
+		}
+		return "账号不可用：CPA标记该凭证不可用"
+	}
+
+	statusText := strings.ToLower(strings.TrimSpace(file.Status))
+	messageText := strings.TrimSpace(file.StatusMessage)
+	combinedText := strings.ToLower(statusText + " " + messageText)
+	errorKeywords := []string{
+		"failed", "failure", "error", "invalid", "unavailable", "disabled", "missing",
+		"失败", "错误", "无效", "不可用", "停用", "缺少",
+	}
+	for _, keyword := range errorKeywords {
+		if strings.Contains(combinedText, keyword) {
+			if messageText != "" {
+				return "账号不可用：" + messageText
+			}
+			if file.Status != "" {
+				return "账号不可用：CPA返回状态 " + file.Status
+			}
+			return "账号不可用：CPA返回异常状态"
+		}
+	}
+
+	return ""
+}
+
+func findAuthFileByEmail(files []cpa.AuthFile, email, provider string) *cpa.AuthFile {
+	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
+	normalizedProvider := normalizeCredentialProvider(provider)
+	var fallback *cpa.AuthFile
+
+	for _, file := range files {
+		if strings.ToLower(strings.TrimSpace(file.Email)) != normalizedEmail {
+			continue
+		}
+
+		authFile := file
+		if fallback == nil {
+			fallback = &authFile
+		}
+		if normalizedProvider == "" || normalizeCredentialProvider(file.Provider) == normalizedProvider {
+			return &authFile
+		}
+	}
+
+	return fallback
+}
+
 // authCompleteHandler 确认授权完成并生成CDK
 func (s *Server) authCompleteHandler(c *gin.Context) {
 	var req AuthCompleteRequest
@@ -620,12 +675,15 @@ func (s *Server) authCompleteHandler(c *gin.Context) {
 
 	// 找出新增的邮箱（在提交回调后新增的，且provider匹配的）
 	var newEmail string
+	var newAuthFile *cpa.AuthFile
 	for _, f := range currentAuthFiles.Files {
 		if f.Email != "" && f.Provider == provider {
 			// 检查这个邮箱是否在提交回调前就已存在
 			// 如果 ExistingEmails 是 nil 或该邮箱不在其中，说明是新增的
 			if pending.ExistingEmails == nil || !pending.ExistingEmails[f.Email] {
 				newEmail = f.Email
+				authFile := f
+				newAuthFile = &authFile
 				break
 			}
 		}
@@ -662,6 +720,18 @@ func (s *Server) authCompleteHandler(c *gin.Context) {
 			Message: "未检测到新凭证，请确认OAuth授权已完成",
 		})
 		return
+	}
+
+	if newAuthFile != nil {
+		if unavailableMessage := authFileUnavailableMessage(*newAuthFile); unavailableMessage != "" {
+			s.deletePendingAuth(req.State)
+			c.JSON(http.StatusBadRequest, AuthStatusResponse{
+				Success: false,
+				Status:  "error",
+				Message: unavailableMessage,
+			})
+			return
+		}
 	}
 
 	// 使用邮箱作为唯一标识进行去重检查
@@ -832,6 +902,36 @@ func (s *Server) iflowAuthHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, AuthStartResponse{
 			Success: false,
 			Message: "iFlow登录失败: 未获取到邮箱信息",
+		})
+		return
+	}
+
+	iflowProvider := iflowResp.Type
+	if strings.TrimSpace(iflowProvider) == "" {
+		iflowProvider = "iflow"
+	}
+
+	currentAuthFiles, err := s.cpaClient.GetAuthFiles(ctx)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, AuthStartResponse{
+			Success: false,
+			Message: "无法验证账号可用性: " + err.Error(),
+		})
+		return
+	}
+
+	authFile := findAuthFileByEmail(currentAuthFiles.Files, email, iflowProvider)
+	if authFile == nil {
+		c.JSON(http.StatusBadRequest, AuthStartResponse{
+			Success: false,
+			Message: "无法确认账号可用性，请稍后重试",
+		})
+		return
+	}
+	if unavailableMessage := authFileUnavailableMessage(*authFile); unavailableMessage != "" {
+		c.JSON(http.StatusBadRequest, AuthStartResponse{
+			Success: false,
+			Message: unavailableMessage,
 		})
 		return
 	}
